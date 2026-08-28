@@ -1,6 +1,7 @@
 package dev.immersiveportalsclient;
 
 import dev.immersiveportalsclient.render.PortalHud;
+import dev.immersiveportalsclient.render.PortalRenderGuard;
 import dev.immersiveportalsclient.render.PortalSurfaceRenderer;
 import dev.immersiveportalsclient.state.PortalState;
 import net.fabricmc.api.ClientModInitializer;
@@ -18,6 +19,7 @@ public final class ImmersivePortalsClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(PortalState::tick);
         ClientLevelEvents.AFTER_CLIENT_LEVEL_CHANGE.register((client, level) -> PortalState.onLevelChanged(level.dimension()));
         PortalHud.register();
+        PortalRenderGuard.register();
         PortalSurfaceRenderer.register();
         LOGGER.info("Immersive Portals Client 26.2 initialized (client-only, Nether/End only)");
     }
