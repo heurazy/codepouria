@@ -17,11 +17,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      - name: Unpack latest client-only source
+      - name: Reconstruct latest client-only source
         working-directory: immersive-portals-client
         run: |
-          tar -xJf latest-src.tar.xz
-          sed -i 's/getModelManager().getBlockModelShaper().getBlockModel(state)/getModelManager().getBlockStateModelSet().get(state)/g' src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
+          cat source-parts/part* | base64 -d > latest-fixed.tar.xz
+          echo "de8a21cc56bf1cc756fa145eb44d13723108ec0ce3c0184f386b22bd6ae7804b  latest-fixed.tar.xz" | sha256sum -c -
+          tar -xJf latest-fixed.tar.xz
       - name: Build Fabric mod
         working-directory: immersive-portals-client
         run: gradle clean build --stacktrace
@@ -29,6 +30,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: immersive-portals-client-26.2
+          name: immersive-portals-client-26.2-alpha2
           path: immersive-portals-client/build/libs/*.jar
           if-no-files-found: ignore
