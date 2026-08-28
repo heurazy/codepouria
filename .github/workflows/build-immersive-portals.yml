@@ -17,6 +17,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
+      - name: Unpack latest client-only source
+        working-directory: immersive-portals-client
+        run: tar -xJf latest-src.tar.xz
       - name: Build Fabric mod
         working-directory: immersive-portals-client
         run: gradle clean build --stacktrace
