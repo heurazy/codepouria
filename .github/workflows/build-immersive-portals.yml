@@ -1,4 +1,4 @@
-name: Inspect Minecraft 26.2 collector APIs
+name: Build Immersive Portals Client 26.2 alpha.4
 on:
   push:
     branches:
@@ -20,18 +20,40 @@ jobs:
         run: |
           cat source-alpha4/part* | base64 -d > latest-alpha4.tar.xz
           tar -xJf latest-alpha4.tar.xz
-      - name: Inspect
+      - name: Patch renderer for Minecraft 26.2
         working-directory: immersive-portals-client
         run: |
-          cat >> build.gradle <<'EOF'
-          tasks.register('dumpClientCp') { doLast { println sourceSets.client.compileClasspath.asPath } }
-          EOF
-          CP=$(gradle -q dumpClientCp | tail -n 1)
-          for C in \
-            net.minecraft.client.renderer.RenderPipelines \
-            net.minecraft.client.renderer.SubmitNodeCollector \
-            net.minecraft.client.renderer.OrderedSubmitNodeCollector \
-            net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext; do
-            echo "===== $C ====="
-            javap -classpath "$CP" -p "$C" 2>&1 | head -260
-          done
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java')
+          s = p.read_text()
+          s = s.replace('import java.util.Comparator;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.Set;\n', 'import java.util.Comparator;\nimport java.util.HashMap;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.Map;\nimport java.util.Optional;\nimport java.util.Set;\n')
+          s = s.replace('import com.mojang.blaze3d.pipeline.RenderPipeline;\nimport com.mojang.blaze3d.platform.DepthTestFunction;\nimport com.mojang.blaze3d.vertex.DefaultVertexFormat;\n', 'import com.mojang.blaze3d.GpuFormat;\nimport com.mojang.blaze3d.PrimitiveTopology;\nimport com.mojang.blaze3d.pipeline.ColorTargetState;\nimport com.mojang.blaze3d.pipeline.DepthStencilState;\nimport com.mojang.blaze3d.pipeline.RenderPipeline;\nimport com.mojang.blaze3d.platform.CompareOp;\nimport com.mojang.blaze3d.vertex.DefaultVertexFormat;\n')
+          s = s.replace('import com.mojang.blaze3d.vertex.VertexFormat;\n', '')
+          s = s.replace('import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;\n', 'import net.fabricmc.fabric.api.client.renderer.v1.Renderer;\nimport net.fabricmc.fabric.api.client.renderer.v1.mesh.Mesh;\nimport net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;\n')
+          s = s.replace('import net.minecraft.client.renderer.OrderedSubmitNodeCollector;\n', 'import net.minecraft.client.Minecraft;\nimport net.minecraft.client.renderer.OrderedSubmitNodeCollector;\nimport net.minecraft.client.renderer.Sheets;\nimport net.minecraft.client.renderer.block.BlockAndTintGetter;\nimport net.minecraft.client.renderer.block.dispatch.BlockStateModel;\n')
+          s = s.replace('import net.minecraft.client.renderer.texture.OverlayTexture;\n', 'import net.minecraft.client.renderer.texture.OverlayTexture;\nimport net.minecraft.client.resources.model.geometry.BakedQuad;\n')
+          s = s.replace('import net.minecraft.util.ARGB;\n', 'import net.minecraft.util.ARGB;\nimport net.minecraft.util.RandomSource;\n')
+          s = s.replace('''    private static final RenderPipeline DEPTH_RESET_PIPELINE = RenderPipeline.builder(RenderPipelines.MATRICES_PROJECTION_SNIPPET)\n        .withLocation("pipeline/immersive_portals_client_depth_reset")\n        .withVertexShader("core/position")\n        .withFragmentShader("core/position")\n        .withDepthTestFunction(DepthTestFunction.NO_DEPTH_TEST)\n        .withDepthWrite(true)\n        .withColorWrite(false)\n        .withCull(false)\n        .withVertexFormat(DefaultVertexFormat.POSITION, VertexFormat.Mode.QUADS)\n        .build();\n''', '''    private static final RenderPipeline DEPTH_RESET_PIPELINE = RenderPipeline.builder(RenderPipelines.DEBUG_FILLED_SNIPPET)\n        .withLocation("pipeline/immersive_portals_client_depth_reset")\n        .withVertexShader("core/position")\n        .withFragmentShader("core/position")\n        .withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS, true))\n        .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_NONE))\n        .withCull(false)\n        .withVertexBinding(0, DefaultVertexFormat.POSITION)\n        .withPrimitiveTopology(PrimitiveTopology.QUADS)\n        .build();\n''')
+          s = s.replace('''    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        BlockState state\n    ) { }\n''', '''    private record PreparedModel(\n        Mesh mesh,\n        RenderType renderType,\n        boolean translucent\n    ) { }\n\n    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        PreparedModel model\n    ) { }\n''')
+          s = s.replace('    private static List<LearnedFrame> learnedFrames = List.of();\n', '    private static final int[] EMPTY_TINTS = new int[0];\n    private static final Map<BlockState, PreparedModel> MODEL_CACHE = new HashMap<>();\n    private static List<LearnedFrame> learnedFrames = List.of();\n')
+          s = s.replace('''                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), sample.state()\n                ));\n''', '''                PreparedModel model = modelFor(sample.state());\n                if (model == null) continue;\n                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), model\n                ));\n''')
+          marker = '''    private static long sampleKey(int x, int y, int z) {\n        // Snapshot offsets stay well inside [-32, 32]. Biasing gives a compact collision-free key.\n        return ((long) (x + 64) << 16) | ((long) (y + 64) << 8) | (long) (z + 64);\n    }\n\n'''
+          model_for = '''    private static PreparedModel modelFor(BlockState state) {\n        PreparedModel cached = MODEL_CACHE.get(state);\n        if (cached != null) return cached;\n\n        BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);\n        if (model == null) return null;\n\n        boolean translucent = model.hasMaterialFlag(BakedQuad.FLAG_TRANSLUCENT);\n        var mutableMesh = Renderer.get().mutableMesh();\n        model.emitQuads(\n            mutableMesh.emitter(),\n            BlockAndTintGetter.EMPTY,\n            BlockPos.ZERO,\n            state,\n            RandomSource.create(state.hashCode()),\n            direction -> false\n        );\n\n        Mesh mesh = mutableMesh.immutableCopy();\n        RenderType renderType = translucent ? Sheets.translucentBlockItemSheet() : Sheets.cutoutBlockItemSheet();\n        PreparedModel prepared = new PreparedModel(mesh, renderType, translucent);\n        MODEL_CACHE.put(state, prepared);\n        return prepared;\n    }\n\n'''
+          if 'private static PreparedModel modelFor' not in s:
+              s = s.replace(marker, marker + model_for)
+          s = s.replace('''            remoteCollector.submitBlock(\n                poseStack,\n                sample.state(),\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''', '''            PreparedModel model = sample.model();\n            remoteCollector.submitBlockModel(\n                poseStack,\n                layer -> model.renderType(),\n                model.translucent(),\n                List.of(),\n                model.mesh(),\n                EMPTY_TINTS,\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''')
+          p.write_text(s)
+          PY
+      - name: Build
+        working-directory: immersive-portals-client
+        run: gradle clean build --stacktrace
+      - name: Show jars
+        working-directory: immersive-portals-client
+        run: find build/libs -maxdepth 1 -type f -name '*.jar' -print -exec sha256sum {} \;
+      - name: Upload jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive-portals-client-26.2-alpha.4
+          path: immersive-portals-client/build/libs/*.jar
+          if-no-files-found: error
