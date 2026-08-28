@@ -1,4 +1,4 @@
-name: Build Immersive Portals Client 26.2
+name: Inspect Minecraft 26.2 rendering internals
 on:
   push:
     branches:
@@ -22,36 +22,25 @@ jobs:
           cat source-alpha4/part* | base64 -d > latest-alpha4.tar.xz
           echo "374c3576d6f049379c1ae2d0d1ba40fe93d8007b72956a72323d4c06ccfacbbc  latest-alpha4.tar.xz" | sha256sum -c -
           tar -xJf latest-alpha4.tar.xz
-      - name: Inspect Minecraft 26.2 rendering API
+      - name: Inspect exact APIs
         working-directory: immersive-portals-client
         run: |
           cat >> build.gradle <<'EOF'
           tasks.register('dumpClientCp') {
-              doLast {
-                  println sourceSets.client.compileClasspath.asPath
-              }
+              doLast { println sourceSets.client.compileClasspath.asPath }
           }
           EOF
           gradle -q dumpClientCp > /tmp/cp.txt
           CP=$(tail -n 1 /tmp/cp.txt)
-          echo '=== RenderPipeline ==='
-          javap -classpath "$CP" 'com.mojang.blaze3d.pipeline.RenderPipeline$Builder' || true
-          echo '=== RenderPipeline root ==='
-          javap -classpath "$CP" com.mojang.blaze3d.pipeline.RenderPipeline || true
-          echo '=== RenderPipelines ==='
-          javap -classpath "$CP" net.minecraft.client.renderer.RenderPipelines || true
-          echo '=== PrimitiveTopology ==='
-          javap -classpath "$CP" com.mojang.blaze3d.PrimitiveTopology || true
-          echo '=== DepthTestFunction candidates ==='
-          javap -classpath "$CP" com.mojang.blaze3d.DepthTestFunction || true
-          javap -classpath "$CP" com.mojang.blaze3d.platform.DepthTestFunction || true
-          echo '=== OrderedSubmitNodeCollector ==='
-          javap -classpath "$CP" net.minecraft.client.renderer.OrderedSubmitNodeCollector || true
-          echo '=== SubmitNodeCollector ==='
-          javap -classpath "$CP" net.minecraft.client.renderer.SubmitNodeCollector || true
-          echo '=== BlockModelRenderState ==='
-          javap -classpath "$CP" net.minecraft.client.renderer.block.BlockModelRenderState || true
-          echo '=== RenderType ==='
-          javap -classpath "$CP" net.minecraft.client.renderer.rendertype.RenderType || true
-          echo '=== RenderSetup ==='
-          javap -classpath "$CP" net.minecraft.client.renderer.rendertype.RenderSetup || true
+          for C in \
+            com.mojang.blaze3d.pipeline.DepthStencilState \
+            com.mojang.blaze3d.pipeline.ColorTargetState \
+            com.mojang.blaze3d.CompareFunction \
+            com.mojang.blaze3d.vertex.DefaultVertexFormat \
+            net.minecraft.client.renderer.block.BlockModelRenderState \
+            net.minecraft.client.renderer.block.dispatch.BlockStateModelPart \
+            net.minecraft.client.renderer.rendertype.RenderTypes \
+            net.minecraft.client.renderer.rendertype.RenderSetup\$RenderSetupBuilder; do
+            echo "===== $C ====="
+            javap -classpath "$CP" -p -c "$C" || true
+          done
