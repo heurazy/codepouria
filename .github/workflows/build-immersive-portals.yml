@@ -17,12 +17,28 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      - name: Reconstruct latest client-only source
+      - name: Reconstruct alpha2 source and apply alpha3 renderer fix
         working-directory: immersive-portals-client
         run: |
           cat source-parts/part* | base64 -d > latest-fixed.tar.xz
           echo "de8a21cc56bf1cc756fa145eb44d13723108ec0ce3c0184f386b22bd6ae7804b  latest-fixed.tar.xz" | sha256sum -c -
           tar -xJf latest-fixed.tar.xz
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java')
+          s = p.read_text()
+          s = s.replace('private static final int MAX_SURFACE_SAMPLES_PER_PORTAL = 1100;', 'private static final int MAX_SURFACE_SAMPLES_PER_PORTAL = 2400;')
+          s = s.replace('private static final double COMPRESSED_NEAR_DEPTH = 0.10;\n    private static final double COMPRESSED_FAR_DEPTH = 0.34;\n    private static final double COMPRESSED_BACKING_DEPTH = 0.41;\n    private static final double DEPTH_CURVE = 5.5;\n    private static final float COMPRESSED_NORMAL_SCALE = 0.075f;', 'private static final double COMPRESSED_NEAR_DEPTH = 0.14;\n    private static final double COMPRESSED_FAR_DEPTH = 8.0;\n    private static final double COMPRESSED_BACKING_DEPTH = 8.75;\n    private static final double DEPTH_CURVE = 6.0;')
+          s = s.replace('private record CompressedProjection(Vec3 center, float tangentScale, float normalScale) { }', 'private record CompressedProjection(Vec3 center, float uniformScale) { }')
+          s = s.replace('            applyPortalScale(\n                poseStack, source.plane(), projected.tangentScale(), projected.normalScale()\n            );', '            poseStack.scale(projected.uniformScale(), projected.uniformScale(), projected.uniformScale());')
+          s = s.replace('        float tangentScale = (float) t;\n        float normalScale = Math.min(tangentScale, COMPRESSED_NORMAL_SCALE);\n        return new CompressedProjection(projected, tangentScale, normalScale);\n    }\n\n    private static void applyPortalScale(\n        PoseStack poseStack,\n        PortalFrame.Plane plane,\n        float tangentScale,\n        float normalScale\n    ) {\n        switch (plane) {\n            case X -> poseStack.scale(tangentScale, tangentScale, normalScale);\n            case Z -> poseStack.scale(normalScale, tangentScale, tangentScale);\n            case HORIZONTAL -> poseStack.scale(tangentScale, normalScale, tangentScale);\n        }\n    }', '        float uniformScale = (float) t;\n        return new CompressedProjection(projected, uniformScale);\n    }')
+          if 'COMPRESSED_NORMAL_SCALE' in s or 'applyPortalScale(' in s:
+              raise SystemExit('alpha3 renderer patch did not apply cleanly')
+          p.write_text(s)
+          gp = Path('gradle.properties')
+          g = gp.read_text().replace('mod_version=0.2.1-alpha.2', 'mod_version=0.2.1-alpha.3')
+          gp.write_text(g)
+          PY
       - name: Build Fabric mod
         working-directory: immersive-portals-client
         run: gradle clean build --stacktrace
@@ -30,6 +46,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: immersive-portals-client-26.2-alpha2
+          name: immersive-portals-client-26.2-alpha3
           path: immersive-portals-client/build/libs/*.jar
           if-no-files-found: ignore
