@@ -1,4 +1,4 @@
-name: Inspect Minecraft 26.2 portal renderer APIs
+name: Inspect Minecraft 26.2 pipeline APIs
 on:
   push:
     branches:
@@ -20,7 +20,7 @@ jobs:
         run: |
           cat source-alpha4/part* | base64 -d > latest-alpha4.tar.xz
           tar -xJf latest-alpha4.tar.xz
-      - name: Inspect concise APIs
+      - name: Inspect pipeline APIs
         working-directory: immersive-portals-client
         run: |
           cat >> build.gradle <<'EOF'
@@ -28,15 +28,11 @@ jobs:
           EOF
           CP=$(gradle -q dumpClientCp | tail -n 1)
           for C in \
-            'com.mojang.blaze3d.pipeline.DepthStencilState$DepthTest' \
-            com.mojang.blaze3d.CompareFunction \
-            com.mojang.blaze3d.vertex.VertexConsumer \
-            net.minecraft.client.resources.model.geometry.BakedQuad \
-            net.minecraft.client.renderer.block.model.BakedQuad \
-            net.minecraft.client.renderer.block.dispatch.BlockStateModelPart \
-            net.minecraft.client.renderer.Sheets \
-            net.minecraft.client.renderer.rendertype.RenderTypes \
-            net.minecraft.client.renderer.block.BlockModelRenderState; do
+            'com.mojang.blaze3d.pipeline.RenderPipeline$Builder' \
+            com.mojang.blaze3d.pipeline.RenderPipeline \
+            com.mojang.blaze3d.pipeline.DepthStencilState \
+            com.mojang.blaze3d.platform.CompareOp \
+            com.mojang.blaze3d.pipeline.ColorTargetState; do
             echo "===== $C ====="
-            javap -classpath "$CP" -p "$C" 2>&1 | head -120
+            javap -classpath "$CP" -p "$C" 2>&1 | head -180
           done
