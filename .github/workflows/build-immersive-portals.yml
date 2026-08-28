@@ -1,4 +1,4 @@
-name: Build Immersive Portals Client 26.2 alpha.5 standalone
+name: Build Immersive Portals Client 26.2 alpha.7 Lunar
 on:
   push:
     branches:
@@ -45,7 +45,43 @@ jobs:
           s = s.replace('''            remoteCollector.submitBlock(\n                poseStack,\n                sample.state(),\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''', '''            PreparedModel model = sample.model();\n            remoteCollector.submitBlockModel(\n                poseStack,\n                layer -> model.renderType(),\n                model.translucent(),\n                List.of(),\n                model.mesh(),\n                EMPTY_TINTS,\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''')
           p.write_text(s)
           PY
-      - name: Make standalone and bump version
+      - name: Isolate snapshots per portal
+        working-directory: immersive-portals-client
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          state = Path('src/client/java/dev/immersiveportalsclient/state/PortalState.java')
+          s = state.read_text()
+          s = s.replace(
+              '    private static PortalFrame lastClosePortal;\n    private static PortalMemory.SceneSnapshot lastSourceScene;\n',
+              '    private static PortalFrame lastClosePortal;\n    private static PortalFrame lastSourcePortal;\n    private static PortalMemory.SceneSnapshot lastSourceScene;\n'
+          )
+          old = '''            if (observed.distanceToSqr(client.player.position()) <= 12.25) {\n                lastClosePortal = observed;\n                // Keep a recent source-side cache while the player is actually entering the portal.\n                // This costs one local scan per second at most and avoids learning a stale scene if\n                // blocks changed since the portal was first discovered.\n                if (lastSourceScene == null || closeSceneRefreshCooldown-- <= 0) {\n                    lastSourceScene = PortalMemory.refreshObserved(client.level, observed, client.player.getYRot());\n                    closeSceneRefreshCooldown = 20;\n                }\n                closePortalGraceTicks = 16;\n            } else if (closePortalGraceTicks > 0) {\n'''
+          new = '''            if (observed.distanceToSqr(client.player.position()) <= 12.25) {\n                boolean changedPortal = lastClosePortal == null || !lastClosePortal.sameOpening(observed);\n                if (changedPortal) {\n                    // Never carry the source snapshot of portal A into portal B.\n                    lastSourceScene = null;\n                    lastSourcePortal = null;\n                    closeSceneRefreshCooldown = 0;\n                }\n                lastClosePortal = observed;\n                // Keep a recent source-side cache while the player is actually entering THIS portal.\n                if (lastSourceScene == null || closeSceneRefreshCooldown-- <= 0) {\n                    lastSourceScene = PortalMemory.refreshObserved(client.level, observed, client.player.getYRot());\n                    lastSourcePortal = observed;\n                    closeSceneRefreshCooldown = 20;\n                }\n                closePortalGraceTicks = 16;\n            } else if (closePortalGraceTicks > 0) {\n'''
+          if old not in s:
+              raise SystemExit('PortalState close-portal block not found')
+          s = s.replace(old, new)
+          s = s.replace(
+              '            lastClosePortal = null;\n            lastSourceScene = null;\n            closeSceneRefreshCooldown = 0;\n',
+              '            lastClosePortal = null;\n            lastSourcePortal = null;\n            lastSourceScene = null;\n            closeSceneRefreshCooldown = 0;\n'
+          )
+          marker = '''    public static PortalMemory.SceneSnapshot lastSourceScene() {\n        return lastSourceScene;\n    }\n\n'''
+          replacement = '''    public static PortalMemory.SceneSnapshot lastSourceScene() {\n        return lastSourceScene;\n    }\n\n    public static PortalMemory.SceneSnapshot lastSourceSceneFor(PortalFrame frame) {\n        if (frame == null || lastSourcePortal == null || !lastSourcePortal.sameOpening(frame)) {\n            return null;\n        }\n        return lastSourceScene;\n    }\n\n'''
+          if marker not in s:
+              raise SystemExit('PortalState accessor marker not found')
+          s = s.replace(marker, replacement)
+          state.write_text(s)
+
+          memory = Path('src/client/java/dev/immersiveportalsclient/state/PortalMemory.java')
+          m = memory.read_text()
+          old_line = '            pendingSourceScene = PortalState.lastSourceScene();\n'
+          if old_line not in m:
+              raise SystemExit('PortalMemory source scene assignment not found')
+          m = m.replace(old_line, '            pendingSourceScene = PortalState.lastSourceSceneFor(candidate);\n')
+          memory.write_text(m)
+          PY
+      - name: Make Lunar standalone and bump version
         working-directory: immersive-portals-client
         run: |
           python3 - <<'PY'
@@ -53,8 +89,7 @@ jobs:
           import json
 
           props = Path('gradle.properties')
-          p = props.read_text()
-          p = p.replace('mod_version=0.2.1-alpha.4', 'mod_version=0.2.2-alpha.5')
+          p = props.read_text().replace('mod_version=0.2.1-alpha.4', 'mod_version=0.2.3-alpha.7')
           props.write_text(p)
 
           gradle = Path('build.gradle')
@@ -65,27 +100,34 @@ jobs:
               g = g.replace(needle, replacement)
           gradle.write_text(g)
 
+          aw = Path('src/main/resources/immersive_portals_client.accesswidener')
+          a = aw.read_text()
+          a = a.replace('accessWidener v2 named', 'accessWidener v2 official')
+          aw.write_text(a)
+
           mod = Path('src/main/resources/fabric.mod.json')
           data = json.loads(mod.read_text())
-          data['description'] = 'Standalone client-only Nether/End portal renderer for Fabric 26.2; Fabric API is embedded.'
+          data['description'] = 'Lunar-compatible standalone client-only Nether/End portal renderer for Fabric 26.2; per-portal snapshot isolation.'
           data.get('depends', {}).pop('fabric-api', None)
           mod.write_text(json.dumps(data, indent=2) + '\n')
           PY
       - name: Build
         working-directory: immersive-portals-client
         run: gradle clean build --stacktrace
-      - name: Verify standalone jar
+      - name: Verify Lunar jar
         working-directory: immersive-portals-client
         run: |
           JAR=$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' | head -n 1)
           echo "Runtime JAR: $JAR"
           unzip -p "$JAR" fabric.mod.json
+          echo '--- access widener ---'
+          unzip -p "$JAR" immersive_portals_client.accesswidener | head -n 3
           echo '--- nested jars ---'
-          unzip -l "$JAR" | grep 'META-INF/jars' || true
+          unzip -l "$JAR" | grep 'META-INF/jars' | head -n 20 || true
           sha256sum "$JAR"
       - name: Upload jars
         uses: actions/upload-artifact@v4
         with:
-          name: immersive-portals-client-26.2-alpha.5-standalone
+          name: immersive-portals-client-26.2-alpha.7-lunar
           path: immersive-portals-client/build/libs/*.jar
           if-no-files-found: error
