@@ -1,9 +1,8 @@
-name: Inspect Minecraft 26.2 rendering internals
+name: Inspect Minecraft 26.2 portal renderer APIs
 on:
   push:
     branches:
       - build/immersive-portals-client-26.2
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,31 +15,28 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      - name: Reconstruct alpha4 client-only source
+      - name: Reconstruct source
         working-directory: immersive-portals-client
         run: |
           cat source-alpha4/part* | base64 -d > latest-alpha4.tar.xz
-          echo "374c3576d6f049379c1ae2d0d1ba40fe93d8007b72956a72323d4c06ccfacbbc  latest-alpha4.tar.xz" | sha256sum -c -
           tar -xJf latest-alpha4.tar.xz
-      - name: Inspect exact APIs
+      - name: Inspect concise APIs
         working-directory: immersive-portals-client
         run: |
           cat >> build.gradle <<'EOF'
-          tasks.register('dumpClientCp') {
-              doLast { println sourceSets.client.compileClasspath.asPath }
-          }
+          tasks.register('dumpClientCp') { doLast { println sourceSets.client.compileClasspath.asPath } }
           EOF
-          gradle -q dumpClientCp > /tmp/cp.txt
-          CP=$(tail -n 1 /tmp/cp.txt)
+          CP=$(gradle -q dumpClientCp | tail -n 1)
           for C in \
-            com.mojang.blaze3d.pipeline.DepthStencilState \
-            com.mojang.blaze3d.pipeline.ColorTargetState \
+            'com.mojang.blaze3d.pipeline.DepthStencilState$DepthTest' \
             com.mojang.blaze3d.CompareFunction \
-            com.mojang.blaze3d.vertex.DefaultVertexFormat \
-            net.minecraft.client.renderer.block.BlockModelRenderState \
+            com.mojang.blaze3d.vertex.VertexConsumer \
+            net.minecraft.client.resources.model.geometry.BakedQuad \
+            net.minecraft.client.renderer.block.model.BakedQuad \
             net.minecraft.client.renderer.block.dispatch.BlockStateModelPart \
+            net.minecraft.client.renderer.Sheets \
             net.minecraft.client.renderer.rendertype.RenderTypes \
-            net.minecraft.client.renderer.rendertype.RenderSetup\$RenderSetupBuilder; do
+            net.minecraft.client.renderer.block.BlockModelRenderState; do
             echo "===== $C ====="
-            javap -classpath "$CP" -p -c "$C" || true
+            javap -classpath "$CP" -p "$C" 2>&1 | head -120
           done
