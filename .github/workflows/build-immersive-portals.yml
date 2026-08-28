@@ -1,4 +1,4 @@
-name: Build Immersive Portals Client 26.2 alpha.4
+name: Build Immersive Portals Client 26.2 alpha.5 standalone
 on:
   push:
     branches:
@@ -45,15 +45,47 @@ jobs:
           s = s.replace('''            remoteCollector.submitBlock(\n                poseStack,\n                sample.state(),\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''', '''            PreparedModel model = sample.model();\n            remoteCollector.submitBlockModel(\n                poseStack,\n                layer -> model.renderType(),\n                model.translucent(),\n                List.of(),\n                model.mesh(),\n                EMPTY_TINTS,\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''')
           p.write_text(s)
           PY
+      - name: Make standalone and bump version
+        working-directory: immersive-portals-client
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          props = Path('gradle.properties')
+          p = props.read_text()
+          p = p.replace('mod_version=0.2.1-alpha.4', 'mod_version=0.2.2-alpha.5')
+          props.write_text(p)
+
+          gradle = Path('build.gradle')
+          g = gradle.read_text()
+          needle = '    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n'
+          replacement = needle + '    include "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n'
+          if 'include "net.fabricmc.fabric-api:fabric-api:' not in g:
+              g = g.replace(needle, replacement)
+          gradle.write_text(g)
+
+          mod = Path('src/main/resources/fabric.mod.json')
+          data = json.loads(mod.read_text())
+          data['description'] = 'Standalone client-only Nether/End portal renderer for Fabric 26.2; Fabric API is embedded.'
+          data.get('depends', {}).pop('fabric-api', None)
+          mod.write_text(json.dumps(data, indent=2) + '\n')
+          PY
       - name: Build
         working-directory: immersive-portals-client
         run: gradle clean build --stacktrace
-      - name: Show jars
+      - name: Verify standalone jar
         working-directory: immersive-portals-client
-        run: find build/libs -maxdepth 1 -type f -name '*.jar' -print -exec sha256sum {} \;
+        run: |
+          JAR=$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' | head -n 1)
+          echo "Runtime JAR: $JAR"
+          unzip -p "$JAR" fabric.mod.json
+          echo '--- nested jars ---'
+          unzip -l "$JAR" | grep 'META-INF/jars' || true
+          sha256sum "$JAR"
       - name: Upload jars
         uses: actions/upload-artifact@v4
         with:
-          name: immersive-portals-client-26.2-alpha.4
+          name: immersive-portals-client-26.2-alpha.5-standalone
           path: immersive-portals-client/build/libs/*.jar
           if-no-files-found: error
