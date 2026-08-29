@@ -1,0 +1,33 @@
+name: Inspect Minecraft 26.2 color APIs
+on:
+  push:
+    branches:
+      - build/immersive-portals-client-26.2
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Inspect color APIs
+        working-directory: immersive-portals-client
+        run: |
+          cat >> build.gradle <<'EOF'
+          tasks.register('dumpClientCp') { doLast { println sourceSets.client.compileClasspath.asPath } }
+          EOF
+          CP=$(gradle -q dumpClientCp | tail -n 1)
+          for C in \
+            net.minecraft.client.color.block.BlockColors \
+            net.minecraft.client.renderer.BiomeColors \
+            net.minecraft.client.renderer.block.BlockAndTintGetter \
+            net.minecraft.client.renderer.block.dispatch.BlockStateModel; do
+            echo "===== $C ====="
+            javap -classpath "$CP" -p "$C" 2>&1 | head -250
+          done
