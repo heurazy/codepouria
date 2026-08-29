@@ -33,7 +33,7 @@ jobs:
           cp -R /tmp/ipc-a8-src/assets src/main/resources/
           cp /tmp/ipc-a8-src/fabric.mod.json src/main/resources/fabric.mod.json
           cp /tmp/ipc-a8-src/immersive_portals_client.accesswidener src/main/resources/immersive_portals_client.accesswidener
-      - name: Fix per-face views and capture biome tints
+      - name: Fix per-face views and capture native tint layers
         working-directory: immersive-portals-client
         run: |
           python3 - <<'PY'
@@ -43,7 +43,7 @@ jobs:
           s = p.read_text()
           s = s.replace(
               'public record BlockSample(short dx, short dy, short dz, BlockState state, int packedLight) { }',
-              'public record BlockSample(short dx, short dy, short dz, BlockState state, int packedLight, int tintColor) { }'
+              'public record BlockSample(short dx, short dy, short dz, BlockState state, int packedLight, int[] tintColors) { }'
           )
           s = s.replace(
               '''    public record LearnedDestination(\n        PortalFrame source,\n        PortalFrame destinationPortal,\n        SceneSnapshot destinationScene\n    ) { }''',
@@ -62,7 +62,7 @@ jobs:
               '''    private static void learn(PortalFrame source, PortalFrame destinationPortal, SceneSnapshot scene, SceneSnapshot sourceScene) {\n        learned.put(source, new LearnedDestination(source, destinationPortal, scene, sourceScene));\n    }'''
           )
           old = '''                    int packedLight = LightCoordsUtil.pack(blockLight, skyLight);\n                    blocks.add(new BlockSample((short) dx, (short) dy, (short) dz, state, packedLight));'''
-          new = '''                    int packedLight = LightCoordsUtil.pack(blockLight, skyLight);\n                    int tintColor = Minecraft.getInstance().getBlockColors().getColor(state, level, pos);\n                    if (tintColor == -1) tintColor = 0xFFFFFFFF;\n                    else tintColor |= 0xFF000000;\n                    blocks.add(new BlockSample((short) dx, (short) dy, (short) dz, state, packedLight, tintColor));'''
+          new = '''                    int packedLight = LightCoordsUtil.pack(blockLight, skyLight);\n                    var tintSources = Minecraft.getInstance().getBlockColors().getTintSources(state);\n                    int[] tintColors = new int[tintSources.size()];\n                    for (int tintIndex = 0; tintIndex < tintSources.size(); tintIndex++) {\n                        int color = tintSources.get(tintIndex).colorInWorld(state, level, pos);\n                        if ((color & 0xFF000000) == 0) color |= 0xFF000000;\n                        tintColors[tintIndex] = color;\n                    }\n                    blocks.add(new BlockSample((short) dx, (short) dy, (short) dz, state, packedLight, tintColors));'''
           if old not in s:
               raise SystemExit('capture block not found')
           s = s.replace(old, new)
@@ -80,7 +80,7 @@ jobs:
           )
           s = s.replace(
               '''    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        PreparedModel model\n    ) { }''',
-              '''    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        int tintColor,\n        PreparedModel model\n    ) { }'''
+              '''    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        int[] tintColors,\n        PreparedModel model\n    ) { }'''
           )
           s = s.replace(
               '''    private record LearnedFrame(\n        PortalFrame frame,\n        PortalFrame destinationPortal,\n        PortalMemory.SceneSnapshot scene,\n        List<PreparedSample> samples\n    ) { }''',
@@ -93,23 +93,23 @@ jobs:
           s = s.replace(old, new)
           s = s.replace(
               '''                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), model\n                ));''',
-              '''                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), sample.tintColor(), model\n                ));'''
+              '''                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), sample.tintColors(), model\n                ));'''
           )
           s = s.replace(
               '''                destination.destinationPortal(),\n                scene,\n                List.copyOf(prepared)''',
               '''                destination.destinationPortal(),\n                scene,\n                destination.sourceScene(),\n                List.copyOf(prepared)'''
           )
           old = '''        double sourceBehindSign = sourceBehindSign(source, camera);\n        double destinationExitSign = destinationExitSign(destination, scene.yaw());'''
-          new = '''        double sourceBehindSign = sourceBehindSign(source, camera);\n        double destinationExitSign = destinationExitSign(destination, scene.yaw());\n        PortalMemory.SceneSnapshot sourceScene = learned.sourceScene();\n        if (sourceScene != null && source.plane() != PortalFrame.Plane.HORIZONTAL) {\n            double learnedSourceCameraSide = destinationExitSign(source, sourceScene.yaw());\n            double currentSourceCameraSide = -sourceBehindSign;\n            if (learnedSourceCameraSide * currentSourceCameraSide < 0.0) {\n                destinationExitSign = -destinationExitSign;\n            }\n        }'''
+          new = '''        double sourceBehindSign = sourceBehindSign(source, camera);\n        double destinationExitSign = destinationExitSign(destination, scene.yaw());\n        PortalMemory.SceneSnapshot sourceScene = learned.sourceScene();\n        if (sourceScene != null && source.plane() != PortalFrame.Plane.HORIZONTAL) {\n            // A portal has two physical faces. Use the side from which this pair was learned as\n            // the reference, then flip the destination side when the player walks behind it.\n            double learnedSourceCameraSide = destinationExitSign(source, sourceScene.yaw());\n            double currentSourceCameraSide = -sourceBehindSign;\n            if (learnedSourceCameraSide * currentSourceCameraSide < 0.0) {\n                destinationExitSign = -destinationExitSign;\n            }\n        }'''
           if old not in s:
               raise SystemExit('destination sign block not found')
           s = s.replace(old, new)
           s = s.replace(
               '''                EMPTY_TINTS,\n                sample.packedLight(),''',
-              '''                new int[] { sample.tintColor() },\n                sample.packedLight(),'''
+              '''                sample.tintColors(),\n                sample.packedLight(),'''
           )
           marker = '''    private static boolean within(double value, double min, double max) {\n        return value >= min && value <= max;\n    }\n'''
-          helper = '''    private static boolean hasClearPortalLineOfSight(\n        net.minecraft.client.multiplayer.ClientLevel level, PortalFrame frame, Vec3 camera\n    ) {\n        Vec3 target = frame.center();\n        Vec3 delta = target.subtract(camera);\n        double length = delta.length();\n        if (length < 0.15) return true;\n        Vec3 end = target.subtract(delta.scale(0.08 / length));\n        HitResult hit = level.clip(new ClipContext(\n            camera, end, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, Minecraft.getInstance().player\n        ));\n        return hit.getType() == HitResult.Type.MISS\n            || hit.getLocation().distanceToSqr(camera) + 0.04 >= end.distanceToSqr(camera);\n    }\n\n''' + marker
+          helper = '''    private static boolean hasClearPortalLineOfSight(\n        net.minecraft.client.multiplayer.ClientLevel level, PortalFrame frame, Vec3 camera\n    ) {\n        Vec3 target = frame.center();\n        Vec3 delta = target.subtract(camera);\n        double length = delta.length();\n        if (length < 0.15) return true;\n\n        // Stop slightly before the portal itself. Any visual collision before this point is\n        // source-world geometry and must occlude the portal instead of being erased by its depth pass.\n        Vec3 end = target.subtract(delta.scale(0.08 / length));\n        HitResult hit = level.clip(new ClipContext(\n            camera, end, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, Minecraft.getInstance().player\n        ));\n        return hit.getType() == HitResult.Type.MISS\n            || hit.getLocation().distanceToSqr(camera) + 0.04 >= end.distanceToSqr(camera);\n    }\n\n''' + marker
           if marker not in s:
               raise SystemExit('within marker not found')
           s = s.replace(marker, helper)
@@ -134,7 +134,7 @@ jobs:
           aw.write_text(aw.read_text().replace('accessWidener v2 named', 'accessWidener v2 official'))
           mod = Path('src/main/resources/fabric.mod.json')
           data = json.loads(mod.read_text())
-          data['description'] = 'Lunar-compatible standalone client-only portal renderer: per-face destinations, captured biome tints and source-world occlusion.'
+          data['description'] = 'Lunar-compatible standalone client-only portal renderer: directional portal faces, native biome tint layers and source-world occlusion.'
           data.get('depends', {}).pop('fabric-api', None)
           mod.write_text(json.dumps(data, indent=2) + '\n')
           PY
