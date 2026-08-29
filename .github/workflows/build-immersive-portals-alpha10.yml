@@ -17,19 +17,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      - name: Restore alpha.10 source
+      - name: Restore alpha.9 source and apply alpha.10 patch
         working-directory: immersive-portals-client
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          rm -rf /tmp/ipc-a10-src /tmp/ipc-a10-src.tar.xz
-          mkdir -p /tmp/ipc-a10-src
-          base64 -d alpha10-src.tar.xz.b64 > /tmp/ipc-a10-src.tar.xz
-          tar -xJf /tmp/ipc-a10-src.tar.xz -C /tmp/ipc-a10-src
+          rm -rf /tmp/ipc-a9 /tmp/ipc-a9-src
+          mkdir -p /tmp/ipc-a9 /tmp/ipc-a9-src
+          gh run download 33250726714 --repo heurazy/codepouria -n immersive-portals-client-26.2-alpha.9-lunar -D /tmp/ipc-a9
+          SRC=$(find /tmp/ipc-a9 -maxdepth 1 -type f -name '*-sources.jar' | head -n 1)
+          test -n "$SRC"
+          unzip -q "$SRC" -d /tmp/ipc-a9-src
           rm -rf src/client/java src/main/resources
           mkdir -p src/client/java src/main/resources
-          cp -R /tmp/ipc-a10-src/dev src/client/java/
-          cp -R /tmp/ipc-a10-src/assets src/main/resources/
-          cp /tmp/ipc-a10-src/fabric.mod.json src/main/resources/fabric.mod.json
-          cp /tmp/ipc-a10-src/immersive_portals_client.accesswidener src/main/resources/immersive_portals_client.accesswidener
+          cp -R /tmp/ipc-a9-src/dev src/client/java/
+          cp -R /tmp/ipc-a9-src/assets src/main/resources/
+          cp /tmp/ipc-a9-src/fabric.mod.json src/main/resources/fabric.mod.json
+          cp /tmp/ipc-a9-src/immersive_portals_client.accesswidener src/main/resources/immersive_portals_client.accesswidener
+          patch -p0 < alpha10.patch
       - name: Prepare standalone Lunar build
         working-directory: immersive-portals-client
         run: |
