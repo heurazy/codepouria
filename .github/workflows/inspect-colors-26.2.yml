@@ -1,4 +1,4 @@
-name: Inspect Minecraft 26.2 color APIs
+name: Inspect Minecraft 26.2 occlusion APIs
 on:
   push:
     branches:
@@ -16,7 +16,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      - name: Inspect color APIs
+      - name: Inspect occlusion APIs
         working-directory: immersive-portals-client
         run: |
           cat >> build.gradle <<'EOF'
@@ -24,11 +24,11 @@ jobs:
           EOF
           CP=$(gradle -q dumpClientCp | tail -n 1)
           for C in \
-            net.minecraft.client.color.block.BlockColors \
-            net.minecraft.client.color.block.BlockTintSource \
-            net.minecraft.client.renderer.BiomeColors \
-            net.minecraft.client.renderer.block.BlockAndTintGetter \
-            net.minecraft.client.renderer.block.dispatch.BlockStateModel; do
+            'net.minecraft.world.level.block.state.BlockBehaviour$BlockStateBase' \
+            net.minecraft.world.level.block.Block \
+            net.minecraft.world.level.block.SnowLayerBlock \
+            net.minecraft.world.phys.shapes.VoxelShape \
+            net.minecraft.world.phys.shapes.Shapes; do
             echo "===== $C ====="
-            javap -classpath "$CP" -p "$C" 2>&1 | head -250
+            javap -classpath "$CP" -p "$C" 2>&1 | head -320
           done
