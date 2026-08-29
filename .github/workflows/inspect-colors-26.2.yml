@@ -25,6 +25,7 @@ jobs:
           CP=$(gradle -q dumpClientCp | tail -n 1)
           for C in \
             net.minecraft.client.color.block.BlockColors \
+            net.minecraft.client.color.block.BlockTintSource \
             net.minecraft.client.renderer.BiomeColors \
             net.minecraft.client.renderer.block.BlockAndTintGetter \
             net.minecraft.client.renderer.block.dispatch.BlockStateModel; do
