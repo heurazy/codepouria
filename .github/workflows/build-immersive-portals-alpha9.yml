@@ -62,7 +62,7 @@ jobs:
               '''    private static void learn(PortalFrame source, PortalFrame destinationPortal, SceneSnapshot scene, SceneSnapshot sourceScene) {\n        learned.put(source, new LearnedDestination(source, destinationPortal, scene, sourceScene));\n    }'''
           )
           old = '''                    int packedLight = LightCoordsUtil.pack(blockLight, skyLight);\n                    blocks.add(new BlockSample((short) dx, (short) dy, (short) dz, state, packedLight));'''
-          new = '''                    int packedLight = LightCoordsUtil.pack(blockLight, skyLight);\n                    int tintColor = Minecraft.getInstance().getBlockColors().getColor(state, level, pos, 0);\n                    if (tintColor == -1) tintColor = 0xFFFFFFFF;\n                    else tintColor |= 0xFF000000;\n                    blocks.add(new BlockSample((short) dx, (short) dy, (short) dz, state, packedLight, tintColor));'''
+          new = '''                    int packedLight = LightCoordsUtil.pack(blockLight, skyLight);\n                    int tintColor = Minecraft.getInstance().getBlockColors().getColor(state, level, pos);\n                    if (tintColor == -1) tintColor = 0xFFFFFFFF;\n                    else tintColor |= 0xFF000000;\n                    blocks.add(new BlockSample((short) dx, (short) dy, (short) dz, state, packedLight, tintColor));'''
           if old not in s:
               raise SystemExit('capture block not found')
           s = s.replace(old, new)
@@ -100,7 +100,7 @@ jobs:
               '''                destination.destinationPortal(),\n                scene,\n                destination.sourceScene(),\n                List.copyOf(prepared)'''
           )
           old = '''        double sourceBehindSign = sourceBehindSign(source, camera);\n        double destinationExitSign = destinationExitSign(destination, scene.yaw());'''
-          new = '''        double sourceBehindSign = sourceBehindSign(source, camera);\n        double destinationExitSign = destinationExitSign(destination, scene.yaw());\n        PortalMemory.SceneSnapshot sourceScene = learned.sourceScene();\n        if (sourceScene != null && source.plane() != PortalFrame.Plane.HORIZONTAL) {\n            // Preserve the learned view on the face originally traversed, and flip to the opposite\n            // destination side when the same source portal is viewed from its opposite face.\n            double learnedSourceCameraSide = destinationExitSign(source, sourceScene.yaw());\n            double currentSourceCameraSide = -sourceBehindSign;\n            if (learnedSourceCameraSide * currentSourceCameraSide < 0.0) {\n                destinationExitSign = -destinationExitSign;\n            }\n        }'''
+          new = '''        double sourceBehindSign = sourceBehindSign(source, camera);\n        double destinationExitSign = destinationExitSign(destination, scene.yaw());\n        PortalMemory.SceneSnapshot sourceScene = learned.sourceScene();\n        if (sourceScene != null && source.plane() != PortalFrame.Plane.HORIZONTAL) {\n            double learnedSourceCameraSide = destinationExitSign(source, sourceScene.yaw());\n            double currentSourceCameraSide = -sourceBehindSign;\n            if (learnedSourceCameraSide * currentSourceCameraSide < 0.0) {\n                destinationExitSign = -destinationExitSign;\n            }\n        }'''
           if old not in s:
               raise SystemExit('destination sign block not found')
           s = s.replace(old, new)
@@ -109,7 +109,7 @@ jobs:
               '''                new int[] { sample.tintColor() },\n                sample.packedLight(),'''
           )
           marker = '''    private static boolean within(double value, double min, double max) {\n        return value >= min && value <= max;\n    }\n'''
-          helper = '''    private static boolean hasClearPortalLineOfSight(\n        net.minecraft.client.multiplayer.ClientLevel level, PortalFrame frame, Vec3 camera\n    ) {\n        Vec3 target = frame.center();\n        Vec3 delta = target.subtract(camera);\n        double length = delta.length();\n        if (length < 0.15) return true;\n\n        // End just before the portal plane, otherwise the vanilla portal block itself can be the hit.\n        Vec3 end = target.subtract(delta.scale(0.08 / length));\n        HitResult hit = level.clip(new ClipContext(\n            camera, end, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, Minecraft.getInstance().player\n        ));\n        return hit.getType() == HitResult.Type.MISS\n            || hit.getLocation().distanceToSqr(camera) + 0.04 >= end.distanceToSqr(camera);\n    }\n\n''' + marker
+          helper = '''    private static boolean hasClearPortalLineOfSight(\n        net.minecraft.client.multiplayer.ClientLevel level, PortalFrame frame, Vec3 camera\n    ) {\n        Vec3 target = frame.center();\n        Vec3 delta = target.subtract(camera);\n        double length = delta.length();\n        if (length < 0.15) return true;\n        Vec3 end = target.subtract(delta.scale(0.08 / length));\n        HitResult hit = level.clip(new ClipContext(\n            camera, end, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, Minecraft.getInstance().player\n        ));\n        return hit.getType() == HitResult.Type.MISS\n            || hit.getLocation().distanceToSqr(camera) + 0.04 >= end.distanceToSqr(camera);\n    }\n\n''' + marker
           if marker not in s:
               raise SystemExit('within marker not found')
           s = s.replace(marker, helper)
@@ -124,17 +124,14 @@ jobs:
           props = Path('gradle.properties')
           text = re.sub(r'^mod_version=.*$', 'mod_version=0.2.5-alpha.9', props.read_text(), flags=re.M)
           props.write_text(text)
-
           gradle = Path('build.gradle')
           g = gradle.read_text()
           needle = '    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n'
           if 'include "net.fabricmc.fabric-api:fabric-api:' not in g:
               g = g.replace(needle, needle + '    include "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n')
           gradle.write_text(g)
-
           aw = Path('src/main/resources/immersive_portals_client.accesswidener')
           aw.write_text(aw.read_text().replace('accessWidener v2 named', 'accessWidener v2 official'))
-
           mod = Path('src/main/resources/fabric.mod.json')
           data = json.loads(mod.read_text())
           data['description'] = 'Lunar-compatible standalone client-only portal renderer: per-face destinations, captured biome tints and source-world occlusion.'
