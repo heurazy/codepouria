@@ -1,0 +1,200 @@
+--- src/client/java/dev/immersiveportalsclient/state/PortalMemory.java
++++ src/client/java/dev/immersiveportalsclient/state/PortalMemory.java
+@@ -43,9 +43,9 @@
+         SceneSnapshot sourceScene
+     ) { }
+ 
+-    private static final int CAPTURE_XZ = 12;
+-    private static final int CAPTURE_DOWN = 6;
+-    private static final int CAPTURE_UP = 10;
++    private static final int CAPTURE_XZ = 24;
++    private static final int CAPTURE_DOWN = 10;
++    private static final int CAPTURE_UP = 14;
+     private static final int ARRIVAL_SEARCH_TICKS = 100;
+     private static final int MAX_OBSERVED_SCENES = 12;
+     private static final int MIN_REAL_PORTAL_ARRIVAL_TICKS = 5;
+@@ -240,6 +240,13 @@
+                     BlockState state = level.getBlockState(pos);
+                     if (state.isAir()) continue;
+ 
++                    // Keep only geometry that can actually contribute to the cached view. A fully
++                    // opaque cube buried behind six other fully opaque cubes can never be seen.
++                    // Thin/cutout/partial blocks (snow layers, grass, flowers, rails, glass, etc.)
++                    // are deliberately NOT treated as occluders, so the support blocks underneath
++                    // them remain present in the portal snapshot.
++                    if (isBuriedOpaqueCube(level, pos, state)) continue;
++
+                     int blockLight = level.getBrightness(LightLayer.BLOCK, pos);
+                     int skyLight = level.getBrightness(LightLayer.SKY, pos);
+                     int packedLight = LightCoordsUtil.pack(blockLight, skyLight);
+@@ -257,4 +264,14 @@
+ 
+         return new SceneSnapshot(level.dimension(), origin, yaw, List.copyOf(blocks), level.getGameTime());
+     }
++
++    private static boolean isBuriedOpaqueCube(ClientLevel level, BlockPos pos, BlockState state) {
++        if (!state.isSolidRender()) return false;
++        return level.getBlockState(pos.offset(1, 0, 0)).isSolidRender()
++            && level.getBlockState(pos.offset(-1, 0, 0)).isSolidRender()
++            && level.getBlockState(pos.offset(0, 1, 0)).isSolidRender()
++            && level.getBlockState(pos.offset(0, -1, 0)).isSolidRender()
++            && level.getBlockState(pos.offset(0, 0, 1)).isSolidRender()
++            && level.getBlockState(pos.offset(0, 0, -1)).isSolidRender();
++    }
+ }
+--- src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
++++ src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
+@@ -3,6 +3,7 @@
+ import java.util.ArrayList;
+ import java.util.Comparator;
+ import java.util.HashMap;
++import java.util.IdentityHashMap;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+@@ -65,12 +66,12 @@
+  * keeps neighbouring blocks contiguous and prevents source/destination geometry from competing in the same depth buffer.</p>
+  */
+ public final class PortalSurfaceRenderer {
+-    private static final int MAX_SURFACE_SAMPLES_PER_PORTAL = 5200;
++    private static final int MAX_SURFACE_SAMPLES_PER_PORTAL = 9000;
+     private static final double INSET = 0.045;
+     private static final double APERTURE_MARGIN = 0.06;
+     private static final double PORTAL_EPSILON = 0.085;
+-    private static final double DEPTH_RESET_DISTANCE = 40.0;
+-    private static final double BACKING_DISTANCE = 28.0;
++    private static final double DEPTH_RESET_DISTANCE = 52.0;
++    private static final double BACKING_DISTANCE = 44.0;
+     private static final double BACKING_THICKNESS = 0.012;
+     private static final double BACKING_MARGIN = 0.018;
+     private static final int ORDER_DEPTH_RESET = 10_000;
+@@ -105,9 +106,9 @@
+     ) { }
+ 
+     private record PreparedSample(
+-        short dx,
+-        short dy,
+-        short dz,
++        float localU,
++        float localV,
++        float localN,
+         int packedLight,
+         int[] tintColors,
+         PreparedModel model
+@@ -125,6 +126,11 @@
+ 
+     private static final int[] EMPTY_TINTS = new int[0];
+     private static final Map<BlockState, PreparedModel> MODEL_CACHE = new HashMap<>();
++    // Destination snapshots are immutable after learning. Preparing meshes, surface selection and
++    // destination-local coordinates every extraction frame was pure repeated CPU work. Cache the
++    // prepared result by LearnedDestination identity and reuse it until the portal is relearned.
++    private static final Map<PortalMemory.LearnedDestination, List<PreparedSample>> PREPARED_SCENE_CACHE =
++        new IdentityHashMap<>();
+     private static List<LearnedFrame> learnedFrames = List.of();
+ 
+     private PortalSurfaceRenderer() { }
+@@ -149,33 +155,52 @@
+             if (destination == null || destination.destinationScene() == null) continue;
+ 
+             PortalMemory.SceneSnapshot scene = destination.destinationScene();
+-            List<PortalMemory.BlockSample> surface = selectSurfaceSamples(scene.blocks());
+-            ArrayList<PreparedSample> prepared = new ArrayList<>(Math.min(surface.size(), MAX_SURFACE_SAMPLES_PER_PORTAL));
+-
+-            for (PortalMemory.BlockSample sample : surface) {
+-                if (prepared.size() >= MAX_SURFACE_SAMPLES_PER_PORTAL) break;
+-                if (sample.state().is(Blocks.NETHER_PORTAL) || sample.state().is(Blocks.END_PORTAL)) continue;
+-                if (isDestinationPortalFrameSample(sample, scene, destination.destinationPortal())) continue;
+-
+-                PreparedModel model = modelFor(sample.state());
+-                if (model == null) continue;
+-                prepared.add(new PreparedSample(
+-                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), sample.tintColors(), model
+-                ));
+-            }
++            List<PreparedSample> prepared = PREPARED_SCENE_CACHE.computeIfAbsent(
++                destination, PortalSurfaceRenderer::prepareDestinationSamples
++            );
+ 
+             next.add(new LearnedFrame(
+                 frame,
+                 destination.destinationPortal(),
+                 scene,
+                 destination.sourceScene(),
+-                List.copyOf(prepared)
++                prepared
+             ));
+         }
+ 
+         learnedFrames = List.copyOf(next);
+     }
+ 
++    private static List<PreparedSample> prepareDestinationSamples(PortalMemory.LearnedDestination destination) {
++        PortalMemory.SceneSnapshot scene = destination.destinationScene();
++        List<PortalMemory.BlockSample> surface = selectSurfaceSamples(scene.blocks());
++        ArrayList<PreparedSample> prepared = new ArrayList<>(Math.min(surface.size(), MAX_SURFACE_SAMPLES_PER_PORTAL));
++
++        double originBlockX = Math.floor(scene.origin().x);
++        double originBlockY = Math.floor(scene.origin().y);
++        double originBlockZ = Math.floor(scene.origin().z);
++
++        for (PortalMemory.BlockSample sample : surface) {
++            if (prepared.size() >= MAX_SURFACE_SAMPLES_PER_PORTAL) break;
++            if (sample.state().is(Blocks.NETHER_PORTAL) || sample.state().is(Blocks.END_PORTAL)) continue;
++            if (isDestinationPortalFrameSample(sample, scene, destination.destinationPortal())) continue;
++
++            PreparedModel model = modelFor(sample.state());
++            if (model == null) continue;
++
++            double relX = sample.dx() + 0.5 + originBlockX - scene.origin().x;
++            double relY = sample.dy() + 0.5 + originBlockY - scene.origin().y;
++            double relZ = sample.dz() + 0.5 + originBlockZ - scene.origin().z;
++            LocalPoint local = destinationLocal(destination.destinationPortal(), scene.yaw(), relX, relY, relZ);
++            prepared.add(new PreparedSample(
++                (float) local.u(), (float) local.v(), (float) local.n(),
++                sample.packedLight(), sample.tintColors(), model
++            ));
++        }
++
++        return List.copyOf(prepared);
++    }
++
+     /**
+      * Keep exposed blocks first instead of taking every Nth block from scan order. The previous
+      * stride sampling made stripes/holes that read visually as random pixels.
+@@ -183,7 +208,12 @@
+     private static List<PortalMemory.BlockSample> selectSurfaceSamples(List<PortalMemory.BlockSample> blocks) {
+         Set<Long> occupied = new HashSet<>(blocks.size() * 2);
+         for (PortalMemory.BlockSample sample : blocks) {
+-            occupied.add(sampleKey(sample.dx(), sample.dy(), sample.dz()));
++            // Only a full solid render is allowed to hide a neighbour. Thin/cutout/partial models
++            // such as snow layers, grass, flowers, rails, panes and leaves must not erase the block
++            // directly behind/below them.
++            if (sample.state().isSolidRender()) {
++                occupied.add(sampleKey(sample.dx(), sample.dy(), sample.dz()));
++            }
+         }
+ 
+         ArrayList<PortalMemory.BlockSample> surface = new ArrayList<>();
+@@ -321,19 +351,10 @@
+         float modelYaw = modelYawDegrees(source, destination, sourceBehindSign, destinationExitSign, scene.yaw());
+         PoseStack poseStack = context.poseStack();
+ 
+-        double originBlockX = Math.floor(scene.origin().x);
+-        double originBlockY = Math.floor(scene.origin().y);
+-        double originBlockZ = Math.floor(scene.origin().z);
+-
+         for (PreparedSample sample : learned.samples()) {
+-            double relX = sample.dx() + 0.5 + originBlockX - scene.origin().x;
+-            double relY = sample.dy() + 0.5 + originBlockY - scene.origin().y;
+-            double relZ = sample.dz() + 0.5 + originBlockZ - scene.origin().z;
+-
+-            LocalPoint local = destinationLocal(destination, scene.yaw(), relX, relY, relZ);
+-            double u = local.u() * destinationExitSign;
+-            double v = local.v();
+-            double n = local.n() * destinationExitSign;
++            double u = sample.localU() * destinationExitSign;
++            double v = sample.localV();
++            double n = sample.localN() * destinationExitSign;
+             if (n < -0.35) continue;
+ 
+             // Rigid full-scale transform: every cached block keeps exactly one-block spacing. The
