@@ -38,6 +38,16 @@ jobs:
           patch -p0 < alpha11.patch
           base64 -d alpha12.patch.b64 > /tmp/alpha12.patch
           patch -p0 < /tmp/alpha12.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java')
+          s = p.read_text()
+          old = 'sample.packedLight(), sample.tintColors(), model\n'
+          new = 'sample.packedLight(), sample.tintColors(), sample.state(), model\n'
+          if old in s:
+              s = s.replace(old, new)
+          p.write_text(s)
+          PY
       - name: Prepare standalone Lunar build
         working-directory: immersive-portals-client
         run: |
