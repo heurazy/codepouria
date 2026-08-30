@@ -1,0 +1,55 @@
+--- src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
++++ src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
+@@ -86,6 +86,7 @@
+     private static final int ORDER_BACKING = 10_001;
+     private static final int ORDER_REMOTE_BLOCKS = 10_002;
+     private static final int ORDER_REMOTE_FLUIDS = 10_003;
+     private static final int ORDER_DEPTH_SEAL = 10_004;
++    private static final int ORDER_SKY_RESTORE = 9_999;
+     private static final double DEPTH_SEAL_OFFSET = 0.018;
+@@ -323,6 +324,24 @@
+         PoseStack poseStack = context.poseStack();
+         Vec3 camera = context.gameRenderer().getMainCamera().position();
+ 
++        // alpha.14: submit the destination sky/background in its own earliest colour pass.
++        // The alpha.13 depth seal intentionally sits at the physical portal plane to reject
++        // source-world water/lava rendered later. On some render backends the sky/backing submit
++        // can otherwise be sorted behind that seal and fail its depth test, producing a portal
++        // with geometry but no destination sky. Rendering the backing first makes the sky colour
++        // independent from later translucent/depth ordering while remote blocks still overwrite it.
++        OrderedSubmitNodeCollector skyCollector = context.submitNodeCollector().order(ORDER_SKY_RESTORE);
++        poseStack.pushPose();
++        poseStack.translate(-camera.x, -camera.y, -camera.z);
++        skyCollector.submitCustomGeometry(
++            poseStack,
++            BACKING_TYPE,
++            (pose, buffer) -> {
++                for (LearnedFrame learned : frames) {
++                    drawSkyBacking(pose, buffer, learned.frame(), learned.destination(), camera);
++                }
++            }
++        );
++        poseStack.popPose();
++
+         OrderedSubmitNodeCollector depthCollector = context.submitNodeCollector().order(ORDER_DEPTH_RESET);
+@@ -386,6 +405,19 @@
+         poseStack.popPose();
+     }
++
++    /**
++     * Dedicated destination-sky restore pass. This deliberately reuses the same backing geometry
++     * and colours as the normal backing path but is submitted before every cached-world surface.
++     * Remote blocks/fluids therefore cover it normally, while the later alpha.13 depth seal cannot
++     * make the destination sky disappear because the colour is already present in the framebuffer.
++     */
++    private static void drawSkyBacking(
++        PoseStack.Pose pose,
++        VertexConsumer buffer,
++        PortalFrame frame,
++        PortalMemory.LearnedDestination destination,
++        Vec3 camera
++    ) {
++        drawLearnedSceneBacking(pose, buffer, frame, destination, camera);
++    }
+ 
+     private static void submitSnapshotBlocks(
