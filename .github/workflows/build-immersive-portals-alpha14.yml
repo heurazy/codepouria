@@ -1,0 +1,134 @@
+name: Build Immersive Portals Client 26.2 alpha.14 Lunar
+on:
+  push:
+    branches:
+      - build/immersive-portals-client-26.2
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Restore alpha.13 source and apply alpha.14 sky restore
+        working-directory: immersive-portals-client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf /tmp/ipc-a13 /tmp/ipc-a13-src
+          mkdir -p /tmp/ipc-a13 /tmp/ipc-a13-src
+          gh run download 33266202343 --repo heurazy/codepouria -n immersive-portals-client-26.2-alpha.13-lunar -D /tmp/ipc-a13
+          SRC=$(find /tmp/ipc-a13 -maxdepth 1 -type f -name '*-sources.jar' | head -n 1)
+          test -n "$SRC"
+          unzip -q "$SRC" -d /tmp/ipc-a13-src
+          rm -rf src/client/java src/main/resources
+          mkdir -p src/client/java src/main/resources
+          cp -R /tmp/ipc-a13-src/dev src/client/java/
+          cp -R /tmp/ipc-a13-src/assets src/main/resources/
+          cp /tmp/ipc-a13-src/fabric.mod.json src/main/resources/fabric.mod.json
+          cp /tmp/ipc-a13-src/immersive_portals_client.accesswidener src/main/resources/immersive_portals_client.accesswidener
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java')
+          s = p.read_text()
+
+          old = '    private static final int ORDER_DEPTH_SEAL = 10_004;\n    private static final double DEPTH_SEAL_OFFSET = 0.018;'
+          new = '    private static final int ORDER_DEPTH_SEAL = 10_004;\n    private static final int ORDER_SKY_RESTORE = 9_999;\n    private static final double DEPTH_SEAL_OFFSET = 0.018;'
+          if old not in s:
+              raise SystemExit('alpha14 constants insertion point not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        PoseStack poseStack = context.poseStack();
+        Vec3 camera = context.gameRenderer().getMainCamera().position();
+
+        OrderedSubmitNodeCollector depthCollector = context.submitNodeCollector().order(ORDER_DEPTH_RESET);'''
+          new = '''        PoseStack poseStack = context.poseStack();
+        Vec3 camera = context.gameRenderer().getMainCamera().position();
+
+        // alpha.14: destination sky/background is submitted in its own colour pass before
+        // depth reset, remote geometry and the alpha.13 depth seal. This keeps the sky visible
+        // while the seal still prevents source-world translucent fluids from bleeding through.
+        OrderedSubmitNodeCollector skyCollector = context.submitNodeCollector().order(ORDER_SKY_RESTORE);
+        poseStack.pushPose();
+        poseStack.translate(-camera.x, -camera.y, -camera.z);
+        skyCollector.submitCustomGeometry(
+            poseStack,
+            BACKING_TYPE,
+            (pose, buffer) -> {
+                for (LearnedFrame learned : frames) {
+                    drawSkyBacking(pose, buffer, learned.frame(), learned.destination(), camera);
+                }
+            }
+        );
+        poseStack.popPose();
+
+        OrderedSubmitNodeCollector depthCollector = context.submitNodeCollector().order(ORDER_DEPTH_RESET);'''
+          if old not in s:
+              raise SystemExit('alpha14 render insertion point not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    private static void submitSnapshotBlocks('''
+          new = '''    private static void drawSkyBacking(
+        PoseStack.Pose pose,
+        VertexConsumer buffer,
+        PortalFrame frame,
+        PortalMemory.LearnedDestination destination,
+        Vec3 camera
+    ) {
+        drawLearnedSceneBacking(pose, buffer, frame, destination, camera);
+    }
+
+    private static void submitSnapshotBlocks('''
+          if old not in s:
+              raise SystemExit('alpha14 method insertion point not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+      - name: Prepare standalone Lunar build
+        working-directory: immersive-portals-client
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+          props = Path('gradle.properties')
+          props.write_text(re.sub(r'^mod_version=.*$', 'mod_version=0.2.10-alpha.14', props.read_text(), flags=re.M))
+          gradle = Path('build.gradle')
+          g = gradle.read_text()
+          needle = '    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n'
+          if 'include "net.fabricmc.fabric-api:fabric-api:' not in g:
+              g = g.replace(needle, needle + '    include "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n')
+          gradle.write_text(g)
+          aw = Path('src/main/resources/immersive_portals_client.accesswidener')
+          aw.write_text(aw.read_text().replace('accessWidener v2 named', 'accessWidener v2 official'))
+          mod = Path('src/main/resources/fabric.mod.json')
+          data = json.loads(mod.read_text())
+          data['description'] = 'Lunar-compatible client-only portal renderer with destination sky restored ahead of remote geometry while keeping the translucent depth seal that blocks source-world liquids.'
+          data.get('depends', {}).pop('fabric-api', None)
+          mod.write_text(json.dumps(data, indent=2) + '\n')
+          PY
+      - name: Build
+        working-directory: immersive-portals-client
+        run: gradle clean build --stacktrace
+      - name: Verify
+        working-directory: immersive-portals-client
+        run: |
+          JAR=$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' | head -n 1)
+          echo "Runtime JAR: $JAR"
+          unzip -p "$JAR" fabric.mod.json
+          echo '--- access widener ---'
+          unzip -p "$JAR" immersive_portals_client.accesswidener | head -n 2
+          sha256sum "$JAR"
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive-portals-client-26.2-alpha.14-lunar
+          path: immersive-portals-client/build/libs/*.jar
+          if-no-files-found: error

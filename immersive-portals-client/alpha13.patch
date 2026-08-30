@@ -1,0 +1,100 @@
+--- src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
++++ src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
+@@ -86,6 +86,8 @@
+     private static final int ORDER_BACKING = 10_001;
+     private static final int ORDER_REMOTE_BLOCKS = 10_002;
+     private static final int ORDER_REMOTE_FLUIDS = 10_003;
++    private static final int ORDER_DEPTH_SEAL = 10_004;
++    private static final double DEPTH_SEAL_OFFSET = 0.018;
+     private static final int MAX_FLUID_SAMPLES_PER_PORTAL = 1800;
+     private static final int SKY_BANDS = 10;
+     private static final int DEFAULT_WATER_TINT = 0xFF3F76E4;
+@@ -111,6 +113,17 @@
+         RenderSetup.builder(DEPTH_RESET_PIPELINE).createRenderSetup()
+     );
+ 
++    /**
++     * Final depth-only seal for the portal aperture. Marked translucent so submit rendering places it
++     * after translucent entity/block submits but still before vanilla translucent terrain (water/lava).
++     * This preserves the already-drawn remote portal colour while preventing source-world liquids
++     * behind the portal from blending back over the cached destination.
++     */
++    private static final RenderType DEPTH_SEAL_TYPE = RenderType.create(
++        "immersive_portals_client_depth_seal",
++        RenderSetup.builder(DEPTH_RESET_PIPELINE).sortOnUpload().createRenderSetup()
++    );
++
+     private record PreparedModel(
+         Mesh mesh,
+         RenderType renderType,
+@@ -347,6 +360,24 @@
+         for (LearnedFrame learned : frames) {
+             submitSnapshotBlocks(context, remoteCollector, learned, camera);
+         }
++
++        // Seal the aperture depth at the physical portal plane after the remote submit geometry.
++        // Vanilla translucent terrain is drawn later than submits; without this seal, source-world
++        // water/lava located behind the portal can still depth-test against the far backing plane and
++        // blend over the destination. The seal writes depth only, so it cannot cover portal colours.
++        OrderedSubmitNodeCollector sealCollector = context.submitNodeCollector().order(ORDER_DEPTH_SEAL);
++        poseStack.pushPose();
++        poseStack.translate(-camera.x, -camera.y, -camera.z);
++        sealCollector.submitCustomGeometry(
++            poseStack,
++            DEPTH_SEAL_TYPE,
++            (pose, buffer) -> {
++                for (LearnedFrame learned : frames) {
++                    drawPortalDepthSeal(pose, buffer, learned.frame(), camera);
++                }
++            }
++        );
++        poseStack.popPose();
+     }
+ 
+     private static void submitSnapshotBlocks(
+@@ -749,6 +780,45 @@
+         throw new IllegalStateException("Unhandled portal plane");
+     }
+ 
++    private static void drawPortalDepthSeal(
++        PoseStack.Pose pose,
++        VertexConsumer buffer,
++        PortalFrame frame,
++        Vec3 camera
++    ) {
++        double sign = sourceBehindSign(frame, camera);
++        float minX = frame.minX() + (float) INSET;
++        float maxX = frame.maxX() + 1.0f - (float) INSET;
++        float minY = frame.minY() + (float) INSET;
++        float maxY = frame.maxY() + 1.0f - (float) INSET;
++        float minZ = frame.minZ() + (float) INSET;
++        float maxZ = frame.maxZ() + 1.0f - (float) INSET;
++
++        switch (frame.plane()) {
++            case X -> {
++                float z = (float) (frame.center().z + sign * DEPTH_SEAL_OFFSET);
++                buffer.addVertex(pose, minX, minY, z);
++                buffer.addVertex(pose, maxX, minY, z);
++                buffer.addVertex(pose, maxX, maxY, z);
++                buffer.addVertex(pose, minX, maxY, z);
++            }
++            case Z -> {
++                float x = (float) (frame.center().x + sign * DEPTH_SEAL_OFFSET);
++                buffer.addVertex(pose, x, minY, minZ);
++                buffer.addVertex(pose, x, maxY, minZ);
++                buffer.addVertex(pose, x, maxY, maxZ);
++                buffer.addVertex(pose, x, minY, maxZ);
++            }
++            case HORIZONTAL -> {
++                float y = (float) (frame.center().y + sign * DEPTH_SEAL_OFFSET);
++                buffer.addVertex(pose, minX, y, minZ);
++                buffer.addVertex(pose, minX, y, maxZ);
++                buffer.addVertex(pose, maxX, y, maxZ);
++                buffer.addVertex(pose, maxX, y, minZ);
++            }
++        }
++    }
++
+     private static void drawDepthResetQuad(
+         PoseStack.Pose pose,
+         VertexConsumer buffer,

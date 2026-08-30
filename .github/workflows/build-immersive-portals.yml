@@ -1,0 +1,133 @@
+name: Build Immersive Portals Client 26.2 alpha.7 Lunar
+on:
+  push:
+    branches:
+      - build/immersive-portals-client-26.2
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Reconstruct source
+        working-directory: immersive-portals-client
+        run: |
+          cat source-alpha4/part* | base64 -d > latest-alpha4.tar.xz
+          tar -xJf latest-alpha4.tar.xz
+      - name: Patch renderer for Minecraft 26.2
+        working-directory: immersive-portals-client
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java')
+          s = p.read_text()
+          s = s.replace('import java.util.Comparator;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.Set;\n', 'import java.util.Comparator;\nimport java.util.HashMap;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.Map;\nimport java.util.Optional;\nimport java.util.Set;\n')
+          s = s.replace('import com.mojang.blaze3d.pipeline.RenderPipeline;\nimport com.mojang.blaze3d.platform.DepthTestFunction;\nimport com.mojang.blaze3d.vertex.DefaultVertexFormat;\n', 'import com.mojang.blaze3d.GpuFormat;\nimport com.mojang.blaze3d.PrimitiveTopology;\nimport com.mojang.blaze3d.pipeline.ColorTargetState;\nimport com.mojang.blaze3d.pipeline.DepthStencilState;\nimport com.mojang.blaze3d.pipeline.RenderPipeline;\nimport com.mojang.blaze3d.platform.CompareOp;\nimport com.mojang.blaze3d.vertex.DefaultVertexFormat;\n')
+          s = s.replace('import com.mojang.blaze3d.vertex.VertexFormat;\n', '')
+          s = s.replace('import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;\n', 'import net.fabricmc.fabric.api.client.renderer.v1.Renderer;\nimport net.fabricmc.fabric.api.client.renderer.v1.mesh.Mesh;\nimport net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;\n')
+          s = s.replace('import net.minecraft.client.renderer.OrderedSubmitNodeCollector;\n', 'import net.minecraft.client.Minecraft;\nimport net.minecraft.client.renderer.OrderedSubmitNodeCollector;\nimport net.minecraft.client.renderer.Sheets;\nimport net.minecraft.client.renderer.block.BlockAndTintGetter;\nimport net.minecraft.client.renderer.block.dispatch.BlockStateModel;\n')
+          s = s.replace('import net.minecraft.client.renderer.texture.OverlayTexture;\n', 'import net.minecraft.client.renderer.texture.OverlayTexture;\nimport net.minecraft.client.resources.model.geometry.BakedQuad;\n')
+          s = s.replace('import net.minecraft.util.ARGB;\n', 'import net.minecraft.util.ARGB;\nimport net.minecraft.util.RandomSource;\n')
+          s = s.replace('''    private static final RenderPipeline DEPTH_RESET_PIPELINE = RenderPipeline.builder(RenderPipelines.MATRICES_PROJECTION_SNIPPET)\n        .withLocation("pipeline/immersive_portals_client_depth_reset")\n        .withVertexShader("core/position")\n        .withFragmentShader("core/position")\n        .withDepthTestFunction(DepthTestFunction.NO_DEPTH_TEST)\n        .withDepthWrite(true)\n        .withColorWrite(false)\n        .withCull(false)\n        .withVertexFormat(DefaultVertexFormat.POSITION, VertexFormat.Mode.QUADS)\n        .build();\n''', '''    private static final RenderPipeline DEPTH_RESET_PIPELINE = RenderPipeline.builder(RenderPipelines.DEBUG_FILLED_SNIPPET)\n        .withLocation("pipeline/immersive_portals_client_depth_reset")\n        .withVertexShader("core/position")\n        .withFragmentShader("core/position")\n        .withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS, true))\n        .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_NONE))\n        .withCull(false)\n        .withVertexBinding(0, DefaultVertexFormat.POSITION)\n        .withPrimitiveTopology(PrimitiveTopology.QUADS)\n        .build();\n''')
+          s = s.replace('''    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        BlockState state\n    ) { }\n''', '''    private record PreparedModel(\n        Mesh mesh,\n        RenderType renderType,\n        boolean translucent\n    ) { }\n\n    private record PreparedSample(\n        short dx,\n        short dy,\n        short dz,\n        int packedLight,\n        PreparedModel model\n    ) { }\n''')
+          s = s.replace('    private static List<LearnedFrame> learnedFrames = List.of();\n', '    private static final int[] EMPTY_TINTS = new int[0];\n    private static final Map<BlockState, PreparedModel> MODEL_CACHE = new HashMap<>();\n    private static List<LearnedFrame> learnedFrames = List.of();\n')
+          s = s.replace('''                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), sample.state()\n                ));\n''', '''                PreparedModel model = modelFor(sample.state());\n                if (model == null) continue;\n                prepared.add(new PreparedSample(\n                    sample.dx(), sample.dy(), sample.dz(), sample.packedLight(), model\n                ));\n''')
+          marker = '''    private static long sampleKey(int x, int y, int z) {\n        // Snapshot offsets stay well inside [-32, 32]. Biasing gives a compact collision-free key.\n        return ((long) (x + 64) << 16) | ((long) (y + 64) << 8) | (long) (z + 64);\n    }\n\n'''
+          model_for = '''    private static PreparedModel modelFor(BlockState state) {\n        PreparedModel cached = MODEL_CACHE.get(state);\n        if (cached != null) return cached;\n\n        BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);\n        if (model == null) return null;\n\n        boolean translucent = model.hasMaterialFlag(BakedQuad.FLAG_TRANSLUCENT);\n        var mutableMesh = Renderer.get().mutableMesh();\n        model.emitQuads(\n            mutableMesh.emitter(),\n            BlockAndTintGetter.EMPTY,\n            BlockPos.ZERO,\n            state,\n            RandomSource.create(state.hashCode()),\n            direction -> false\n        );\n\n        Mesh mesh = mutableMesh.immutableCopy();\n        RenderType renderType = translucent ? Sheets.translucentBlockItemSheet() : Sheets.cutoutBlockItemSheet();\n        PreparedModel prepared = new PreparedModel(mesh, renderType, translucent);\n        MODEL_CACHE.put(state, prepared);\n        return prepared;\n    }\n\n'''
+          if 'private static PreparedModel modelFor' not in s:
+              s = s.replace(marker, marker + model_for)
+          s = s.replace('''            remoteCollector.submitBlock(\n                poseStack,\n                sample.state(),\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''', '''            PreparedModel model = sample.model();\n            remoteCollector.submitBlockModel(\n                poseStack,\n                layer -> model.renderType(),\n                model.translucent(),\n                List.of(),\n                model.mesh(),\n                EMPTY_TINTS,\n                sample.packedLight(),\n                OverlayTexture.NO_OVERLAY,\n                0\n            );\n''')
+          p.write_text(s)
+          PY
+      - name: Isolate snapshots per portal
+        working-directory: immersive-portals-client
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          state = Path('src/client/java/dev/immersiveportalsclient/state/PortalState.java')
+          s = state.read_text()
+          s = s.replace(
+              '    private static PortalFrame lastClosePortal;\n    private static PortalMemory.SceneSnapshot lastSourceScene;\n',
+              '    private static PortalFrame lastClosePortal;\n    private static PortalFrame lastSourcePortal;\n    private static PortalMemory.SceneSnapshot lastSourceScene;\n'
+          )
+          old = '''            if (observed.distanceToSqr(client.player.position()) <= 12.25) {\n                lastClosePortal = observed;\n                // Keep a recent source-side cache while the player is actually entering the portal.\n                // This costs one local scan per second at most and avoids learning a stale scene if\n                // blocks changed since the portal was first discovered.\n                if (lastSourceScene == null || closeSceneRefreshCooldown-- <= 0) {\n                    lastSourceScene = PortalMemory.refreshObserved(client.level, observed, client.player.getYRot());\n                    closeSceneRefreshCooldown = 20;\n                }\n                closePortalGraceTicks = 16;\n            } else if (closePortalGraceTicks > 0) {\n'''
+          new = '''            if (observed.distanceToSqr(client.player.position()) <= 12.25) {\n                boolean changedPortal = lastClosePortal == null || !lastClosePortal.sameOpening(observed);\n                if (changedPortal) {\n                    // Never carry the source snapshot of portal A into portal B.\n                    lastSourceScene = null;\n                    lastSourcePortal = null;\n                    closeSceneRefreshCooldown = 0;\n                }\n                lastClosePortal = observed;\n                // Keep a recent source-side cache while the player is actually entering THIS portal.\n                if (lastSourceScene == null || closeSceneRefreshCooldown-- <= 0) {\n                    lastSourceScene = PortalMemory.refreshObserved(client.level, observed, client.player.getYRot());\n                    lastSourcePortal = observed;\n                    closeSceneRefreshCooldown = 20;\n                }\n                closePortalGraceTicks = 16;\n            } else if (closePortalGraceTicks > 0) {\n'''
+          if old not in s:
+              raise SystemExit('PortalState close-portal block not found')
+          s = s.replace(old, new)
+          s = s.replace(
+              '            lastClosePortal = null;\n            lastSourceScene = null;\n            closeSceneRefreshCooldown = 0;\n',
+              '            lastClosePortal = null;\n            lastSourcePortal = null;\n            lastSourceScene = null;\n            closeSceneRefreshCooldown = 0;\n'
+          )
+          marker = '''    public static PortalMemory.SceneSnapshot lastSourceScene() {\n        return lastSourceScene;\n    }\n\n'''
+          replacement = '''    public static PortalMemory.SceneSnapshot lastSourceScene() {\n        return lastSourceScene;\n    }\n\n    public static PortalMemory.SceneSnapshot lastSourceSceneFor(PortalFrame frame) {\n        if (frame == null || lastSourcePortal == null || !lastSourcePortal.sameOpening(frame)) {\n            return null;\n        }\n        return lastSourceScene;\n    }\n\n'''
+          if marker not in s:
+              raise SystemExit('PortalState accessor marker not found')
+          s = s.replace(marker, replacement)
+          state.write_text(s)
+
+          memory = Path('src/client/java/dev/immersiveportalsclient/state/PortalMemory.java')
+          m = memory.read_text()
+          old_line = '            pendingSourceScene = PortalState.lastSourceScene();\n'
+          if old_line not in m:
+              raise SystemExit('PortalMemory source scene assignment not found')
+          m = m.replace(old_line, '            pendingSourceScene = PortalState.lastSourceSceneFor(candidate);\n')
+          memory.write_text(m)
+          PY
+      - name: Make Lunar standalone and bump version
+        working-directory: immersive-portals-client
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          props = Path('gradle.properties')
+          p = props.read_text().replace('mod_version=0.2.1-alpha.4', 'mod_version=0.2.3-alpha.7')
+          props.write_text(p)
+
+          gradle = Path('build.gradle')
+          g = gradle.read_text()
+          needle = '    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n'
+          replacement = needle + '    include "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"\n'
+          if 'include "net.fabricmc.fabric-api:fabric-api:' not in g:
+              g = g.replace(needle, replacement)
+          gradle.write_text(g)
+
+          aw = Path('src/main/resources/immersive_portals_client.accesswidener')
+          a = aw.read_text()
+          a = a.replace('accessWidener v2 named', 'accessWidener v2 official')
+          aw.write_text(a)
+
+          mod = Path('src/main/resources/fabric.mod.json')
+          data = json.loads(mod.read_text())
+          data['description'] = 'Lunar-compatible standalone client-only Nether/End portal renderer for Fabric 26.2; per-portal snapshot isolation.'
+          data.get('depends', {}).pop('fabric-api', None)
+          mod.write_text(json.dumps(data, indent=2) + '\n')
+          PY
+      - name: Build
+        working-directory: immersive-portals-client
+        run: gradle clean build --stacktrace
+      - name: Verify Lunar jar
+        working-directory: immersive-portals-client
+        run: |
+          JAR=$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' | head -n 1)
+          echo "Runtime JAR: $JAR"
+          unzip -p "$JAR" fabric.mod.json
+          echo '--- access widener ---'
+          unzip -p "$JAR" immersive_portals_client.accesswidener | head -n 3
+          echo '--- nested jars ---'
+          unzip -l "$JAR" | grep 'META-INF/jars' | head -n 20 || true
+          sha256sum "$JAR"
+      - name: Upload jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive-portals-client-26.2-alpha.7-lunar
+          path: immersive-portals-client/build/libs/*.jar
+          if-no-files-found: error

@@ -1,0 +1,170 @@
+--- src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
++++ src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java
+@@ -69,6 +69,7 @@
+     private static final int MAX_SURFACE_SAMPLES_PER_PORTAL = 9000;
+     private static final double INSET = 0.045;
+     private static final double APERTURE_MARGIN = 0.06;
++    private static final double BLOCK_CLIP_HALF_EXTENT = 0.505;
+     private static final double PORTAL_EPSILON = 0.085;
+     private static final double DEPTH_RESET_DISTANCE = 52.0;
+     private static final double BACKING_DISTANCE = 44.0;
+@@ -361,7 +362,7 @@
+             // alpha.2/alpha.3 per-block depth scaling changed the scale for every Z slice and was
+             // the source of the separated snow slabs / stretched-looking textures.
+             Vec3 targetCenter = mapBehindSource(source, sourceCenter, sourceBehindSign, u, v, n);
+-            if (!projectsThroughPortal(source, camera, targetCenter)) continue;
++            if (!blockProjectsThroughPortal(source, camera, targetCenter)) continue;
+ 
+             poseStack.pushPose();
+             poseStack.translate(
+@@ -504,49 +505,121 @@
+     }
+ 
+     /**
+-     * Cheap portal-aperture clipping. Intersect the camera -> cached-block ray with the source
+-     * portal plane and only submit blocks whose ray crosses the actual connected opening.
+-     * This prevents the cached destination from painting over the surrounding source world.
++     * Portal-aperture clipping based on the projected volume of a cached block, not only its centre.
++     * A block whose centre falls just outside the portal may still have visible geometry crossing the
++     * opening. Centre-only clipping therefore removed the last row/column of blocks around the frame.
++     * Project the eight corners of the block AABB onto the portal plane and keep it whenever that
++     * projected footprint overlaps the connected portal rectangle.
+      */
+-    private static boolean projectsThroughPortal(PortalFrame frame, Vec3 camera, Vec3 point) {
+-        double t;
+-        double a;
+-        double b;
++    private static boolean blockProjectsThroughPortal(PortalFrame frame, Vec3 camera, Vec3 blockCenter) {
++        double projectedMinA = Double.POSITIVE_INFINITY;
++        double projectedMaxA = Double.NEGATIVE_INFINITY;
++        double projectedMinB = Double.POSITIVE_INFINITY;
++        double projectedMaxB = Double.NEGATIVE_INFINITY;
++        boolean projectedAnyCorner = false;
++
++        for (int ix = -1; ix <= 1; ix += 2) {
++            for (int iy = -1; iy <= 1; iy += 2) {
++                for (int iz = -1; iz <= 1; iz += 2) {
++                    Vec3 corner = new Vec3(
++                        blockCenter.x + ix * BLOCK_CLIP_HALF_EXTENT,
++                        blockCenter.y + iy * BLOCK_CLIP_HALF_EXTENT,
++                        blockCenter.z + iz * BLOCK_CLIP_HALF_EXTENT
++                    );
++                    double[] projection = projectPointToPortalPlane(frame, camera, corner);
++                    if (projection == null) continue;
++
++                    projectedAnyCorner = true;
++                    projectedMinA = Math.min(projectedMinA, projection[0]);
++                    projectedMaxA = Math.max(projectedMaxA, projection[0]);
++                    projectedMinB = Math.min(projectedMinB, projection[1]);
++                    projectedMaxB = Math.max(projectedMaxB, projection[1]);
++                }
++            }
++        }
++
++        if (!projectedAnyCorner) {
++            double[] centerProjection = projectPointToPortalPlane(frame, camera, blockCenter);
++            if (centerProjection == null) return false;
++            projectedMinA = projectedMaxA = centerProjection[0];
++            projectedMinB = projectedMaxB = centerProjection[1];
++        }
++
++        double apertureMinA;
++        double apertureMaxA;
++        double apertureMinB;
++        double apertureMaxB;
++        switch (frame.plane()) {
++            case X -> {
++                apertureMinA = frame.minX() + INSET - APERTURE_MARGIN;
++                apertureMaxA = frame.maxX() + 1.0 - INSET + APERTURE_MARGIN;
++                apertureMinB = frame.minY() + INSET - APERTURE_MARGIN;
++                apertureMaxB = frame.maxY() + 1.0 - INSET + APERTURE_MARGIN;
++            }
++            case Z -> {
++                apertureMinA = frame.minZ() + INSET - APERTURE_MARGIN;
++                apertureMaxA = frame.maxZ() + 1.0 - INSET + APERTURE_MARGIN;
++                apertureMinB = frame.minY() + INSET - APERTURE_MARGIN;
++                apertureMaxB = frame.maxY() + 1.0 - INSET + APERTURE_MARGIN;
++            }
++            case HORIZONTAL -> {
++                apertureMinA = frame.minX() + INSET - APERTURE_MARGIN;
++                apertureMaxA = frame.maxX() + 1.0 - INSET + APERTURE_MARGIN;
++                apertureMinB = frame.minZ() + INSET - APERTURE_MARGIN;
++                apertureMaxB = frame.maxZ() + 1.0 - INSET + APERTURE_MARGIN;
++            }
++            default -> {
++                return false;
++            }
++        }
++
++        return rangesOverlap(projectedMinA, projectedMaxA, apertureMinA, apertureMaxA)
++            && rangesOverlap(projectedMinB, projectedMaxB, apertureMinB, apertureMaxB);
++    }
++
++    /** Returns portal-local 2D coordinates for a camera ray, or null when it never reaches the plane. */
++    private static double[] projectPointToPortalPlane(PortalFrame frame, Vec3 camera, Vec3 point) {
+         Vec3 center = frame.center();
++        double denominator;
++        double t;
+ 
+         switch (frame.plane()) {
+             case X -> {
+-                double denominator = point.z - camera.z;
+-                if (Math.abs(denominator) < 1.0e-5) return false;
++                denominator = point.z - camera.z;
++                if (Math.abs(denominator) < 1.0e-5) return null;
+                 t = (center.z - camera.z) / denominator;
+-                if (t <= 0.0 || t >= 1.0) return false;
+-                a = camera.x + (point.x - camera.x) * t;
+-                b = camera.y + (point.y - camera.y) * t;
+-                return within(a, frame.minX() + INSET - APERTURE_MARGIN, frame.maxX() + 1.0 - INSET + APERTURE_MARGIN)
+-                    && within(b, frame.minY() + INSET - APERTURE_MARGIN, frame.maxY() + 1.0 - INSET + APERTURE_MARGIN);
++                if (t <= 0.0 || t >= 1.0) return null;
++                return new double[] {
++                    camera.x + (point.x - camera.x) * t,
++                    camera.y + (point.y - camera.y) * t
++                };
+             }
+             case Z -> {
+-                double denominator = point.x - camera.x;
+-                if (Math.abs(denominator) < 1.0e-5) return false;
++                denominator = point.x - camera.x;
++                if (Math.abs(denominator) < 1.0e-5) return null;
+                 t = (center.x - camera.x) / denominator;
+-                if (t <= 0.0 || t >= 1.0) return false;
+-                a = camera.z + (point.z - camera.z) * t;
+-                b = camera.y + (point.y - camera.y) * t;
+-                return within(a, frame.minZ() + INSET - APERTURE_MARGIN, frame.maxZ() + 1.0 - INSET + APERTURE_MARGIN)
+-                    && within(b, frame.minY() + INSET - APERTURE_MARGIN, frame.maxY() + 1.0 - INSET + APERTURE_MARGIN);
++                if (t <= 0.0 || t >= 1.0) return null;
++                return new double[] {
++                    camera.z + (point.z - camera.z) * t,
++                    camera.y + (point.y - camera.y) * t
++                };
+             }
+             case HORIZONTAL -> {
+-                double denominator = point.y - camera.y;
+-                if (Math.abs(denominator) < 1.0e-5) return false;
++                denominator = point.y - camera.y;
++                if (Math.abs(denominator) < 1.0e-5) return null;
+                 t = (center.y - camera.y) / denominator;
+-                if (t <= 0.0 || t >= 1.0) return false;
+-                a = camera.x + (point.x - camera.x) * t;
+-                b = camera.z + (point.z - camera.z) * t;
+-                return within(a, frame.minX() + INSET - APERTURE_MARGIN, frame.maxX() + 1.0 - INSET + APERTURE_MARGIN)
+-                    && within(b, frame.minZ() + INSET - APERTURE_MARGIN, frame.maxZ() + 1.0 - INSET + APERTURE_MARGIN);
++                if (t <= 0.0 || t >= 1.0) return null;
++                return new double[] {
++                    camera.x + (point.x - camera.x) * t,
++                    camera.z + (point.z - camera.z) * t
++                };
+             }
+         }
+-        return false;
++        return null;
++    }
++
++    private static boolean rangesOverlap(double minA, double maxA, double minB, double maxB) {
++        return maxA >= minB && maxB >= minA;
+     }
+ 
+     private static boolean hasClearPortalLineOfSight(
