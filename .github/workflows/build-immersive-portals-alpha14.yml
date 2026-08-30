@@ -34,7 +34,64 @@ jobs:
           cp -R /tmp/ipc-a13-src/assets src/main/resources/
           cp /tmp/ipc-a13-src/fabric.mod.json src/main/resources/fabric.mod.json
           cp /tmp/ipc-a13-src/immersive_portals_client.accesswidener src/main/resources/immersive_portals_client.accesswidener
-          patch -p0 < alpha14.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/client/java/dev/immersiveportalsclient/render/PortalSurfaceRenderer.java')
+          s = p.read_text()
+
+          old = '    private static final int ORDER_DEPTH_SEAL = 10_004;\n    private static final double DEPTH_SEAL_OFFSET = 0.018;'
+          new = '    private static final int ORDER_DEPTH_SEAL = 10_004;\n    private static final int ORDER_SKY_RESTORE = 9_999;\n    private static final double DEPTH_SEAL_OFFSET = 0.018;'
+          if old not in s:
+              raise SystemExit('alpha14 constants insertion point not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        PoseStack poseStack = context.poseStack();
+        Vec3 camera = context.gameRenderer().getMainCamera().position();
+
+        OrderedSubmitNodeCollector depthCollector = context.submitNodeCollector().order(ORDER_DEPTH_RESET);'''
+          new = '''        PoseStack poseStack = context.poseStack();
+        Vec3 camera = context.gameRenderer().getMainCamera().position();
+
+        // alpha.14: destination sky/background is submitted in its own colour pass before
+        // depth reset, remote geometry and the alpha.13 depth seal. This keeps the sky visible
+        // while the seal still prevents source-world translucent fluids from bleeding through.
+        OrderedSubmitNodeCollector skyCollector = context.submitNodeCollector().order(ORDER_SKY_RESTORE);
+        poseStack.pushPose();
+        poseStack.translate(-camera.x, -camera.y, -camera.z);
+        skyCollector.submitCustomGeometry(
+            poseStack,
+            BACKING_TYPE,
+            (pose, buffer) -> {
+                for (LearnedFrame learned : frames) {
+                    drawSkyBacking(pose, buffer, learned.frame(), learned.destination(), camera);
+                }
+            }
+        );
+        poseStack.popPose();
+
+        OrderedSubmitNodeCollector depthCollector = context.submitNodeCollector().order(ORDER_DEPTH_RESET);'''
+          if old not in s:
+              raise SystemExit('alpha14 render insertion point not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    private static void submitSnapshotBlocks('''
+          new = '''    private static void drawSkyBacking(
+        PoseStack.Pose pose,
+        VertexConsumer buffer,
+        PortalFrame frame,
+        PortalMemory.LearnedDestination destination,
+        Vec3 camera
+    ) {
+        drawLearnedSceneBacking(pose, buffer, frame, destination, camera);
+    }
+
+    private static void submitSnapshotBlocks('''
+          if old not in s:
+              raise SystemExit('alpha14 method insertion point not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
       - name: Prepare standalone Lunar build
         working-directory: immersive-portals-client
         run: |
